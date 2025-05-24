@@ -1,0 +1,236 @@
+---
+title: "Extração SIM - Morte Súbita"
+author: "Bruno Casaes Teixeira"
+format:
+  html:
+    code-fold: true
+    code-summary: "Show the code"
+    code-tools: true
+    embed-resources: true
+    df-print: paged
+editor: visual
+number-sections: true
+execute:
+  warning: false
+  freeze: auto
+toc: true
+---
+
+```{r Extraction}
+library(tidyverse)
+library(gtsummary)
+library(readxl)
+options(scipen = 999)
+
+
+load("SIM Dcard.RData")
+
+CIDs <- c("I21", "I46", "I44", "I49", "I71", "I50", "I42", "J81")
+
+FxEtaria <- read_excel("D:/DATASUS/aux_datasus2.xlsx", sheet = "FaixaEtaria")
+FxEtaria$FaixaEtr <- factor(FxEtaria$FaixaEtr)
+FxEtaria$FaixaEtr <- reorder(FxEtaria$FaixaEtr, FxEtaria$Idade, mean)
+
+UFMUN <- read_excel("D:/DATASUS/aux_datasus2.xlsx", sheet = "UFMUN")
+lCID <- read_excel("D:/DATASUS/aux_datasus2.xlsx", sheet = "CIDs")
+
+SIMRaw <- dplyr::as_tibble(SIM)
+
+SIM <- SIMRaw %>% 
+  mutate(IDADEc = if_else(IDADE == "999", NA_integer_, if_else(IDADE < 400, 0, as.numeric(IDADE)-400)),
+         SEXO = factor(SEXO, levels = c(1,2,0,9), labels = c("Masculino", "Feminino", "Indefinido", "Indefinido")),
+         CODMUNRES = as.numeric(CODMUNRES),
+         LocOcorr = factor(LOCOCOR, levels = c(1,2,3,4,5,6,9), labels = c("Hospital",
+                                                                          "Outros estabelecimentos de saúde",
+                                                                          "Domicílio",
+                                                                          "Via pública",
+                                                                          "Outros",
+                                                                          "Aldeia indígena",
+                                                                          "Ignorado")),
+         FonteInf = factor(FONTEINV, levels = c(1:9), labels = c("Comitê de Morte Materna e/ou Infantil",
+                                                                 "Visita domiciliar / Entrevista família",
+                                                                 "Estabelecimento de Saúde / Prontuário",
+                                                                 "Relacionado com outros bancos de dados",
+                                                                 "S V O",
+                                                                 "I M L",
+                                                                 "Outra fonte",
+                                                                 "Múltiplas fontes",
+                                                                 "Ignorado")),
+         NECRO = factor(NECROPSIA, levels = c(1,2,9), labels = c("Sim", "Não", "Ignorado")),
+         CPRIMSEC = factor(if_else(substring(CAUSABAS,1,3) %in% CIDs, "Primária", "Secundária")),
+         IdadeM50 = factor(if_else(IDADEc < 50, "Menor de 50", "50 ou mais")),
+         DtObito = dmy(DTOBITO),
+         Ano = year(DtObito)) %>% 
+  left_join(FxEtaria, by = c("IDADEc" = "Idade")) %>% 
+  left_join(UFMUN, by = c("CODMUNRES" = "CD_MUN"))
+
+```
+
+# Mortes Súbitas no Brasil
+
+## Extração
+
+Foram extraídos todos os óbitos entre 2009 e 2021 que continham nos campos CAUSABAS, LINHAA, LINHAB, LINHAC, LINHAD e LINHAII quaisquer dos CIDs: `r CIDs`
+
+```{r}
+SIM %>% 
+  select(IDADEc,
+         IdadeM50,
+         SEXO, 
+         LocOcorr,
+         NECRO,
+         CPRIMSEC,
+         FaixaEtr,
+         UF) %>% 
+  tbl_summary(label = list(IDADEc ~ "Idade",
+                           IdadeM50 ~ "Idade (Categórica)",
+                           SEXO ~ "Sexo",
+                           LocOcorr ~ "Local de Ocorrência",
+                           NECRO ~ "Necrópsia",
+                           CPRIMSEC ~ "Tipo de Causa",
+                           FaixaEtr ~ "Faixa Etaria",
+                           UF ~ "Unidade da Federação")) %>% 
+  bold_labels()
+
+```
+
+## Perguntas
+
+1.  Qual número de MS em menores de 50 anos no Brasil
+
+```{r}
+SIM %>%  
+  filter(!is.na(IdadeM50), CPRIMSEC == "Primária") %>% 
+  group_by(Ano, IdadeM50) %>% 
+  summarise(n = n(),.groups = "drop_last") %>% 
+  mutate(perc = n/sum(n)) %>% 
+  ggplot(aes(x = Ano, y = perc, fill = IdadeM50, label = round(perc * 100, 1))) +
+  geom_col() +
+  geom_text(nudge_y = -0.05, show.legend = FALSE) +
+  theme_classic() +
+  labs(y = "Percentual de Mortes", caption = "Considera apenas causas primárias" , fill = "Idade")
+
+```
+
+Menores de 50 anos representam aproximadamnente 10% das mortes. Esse percentual vem caindo ao longo dos anos.
+
+2.  Qual a proporção de SVOs feitos para essa faixa etária e por faixa etária
+
+```{r}
+SIM %>% 
+  filter(!is.na(IdadeM50), !is.na(NECRO)) %>% 
+  group_by(IdadeM50, NECRO) %>% 
+  summarise(n = n(), .groups = "drop") %>% 
+  ggplot(aes(x = NECRO, y = n, fill = IdadeM50))+
+  geom_col() +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 30, vjust = 1, hjust=1))+
+  labs(fill = "Idade", y = "Número de Casos", x = "Necropsia", caption = "Considera apenas casos com Fonte preenchida")
+  
+
+```
+
+Dados brutos:
+
+```{r}
+SIM %>% 
+  filter(!is.na(IdadeM50), !is.na(NECRO)) %>% 
+  group_by(IdadeM50, NECRO) %>% 
+  summarise(n = n(), .groups = "drop") %>% 
+  rename("Idade Grupo" = IdadeM50, "Necropsia" = NECRO, "Número de Óbitos" = n)
+```
+
+3.  Qual o número de óbitos nessa faixa etária pelas causas: I21, I46, I 44 (vimos que não tem), I49 (vimos que não tem), I 71, I50, I42 (vimos que não tem), J81
+
+```{r}
+SIM %>% 
+  filter(CPRIMSEC == "Primária", !is.na(IdadeM50)) %>% 
+  left_join(lCID %>% select(-CID_GRUPO), by = c("CAUSABAS" = "CD_COD")) %>% 
+  select(CID, IdadeM50) %>% 
+  tbl_summary(by = IdadeM50,
+              sort = all_categorical() ~ "frequency")
+```
+
+4.  Qual o número de óbitos pelas causas do item 3 por faixa etária
+
+```{r}
+SIM %>% 
+  filter(CPRIMSEC == "Primária", !is.na(IdadeM50)) %>% 
+  mutate(CBASGRP = substring(CAUSABAS, 1,3)) %>% 
+  left_join(lCID %>% select(-CID_GRUPO), by = c("CBASGRP" = "CD_COD")) %>% 
+  select(CID, FaixaEtr) %>% 
+  tbl_summary(by = FaixaEtr,
+              sort = all_categorical() ~ "frequency")
+```
+
+5.  Quantos que morrem fora de "hospital" por esses cids não vão para SVO
+6.  Quantos que morrem em "serviços de saúde" por essas causas e não vâo para o SVO
+
+```{r}
+SIM %>% 
+  filter(CPRIMSEC == "Primária") %>% 
+  select(LocOcorr, NECRO) %>% 
+  tbl_summary(by = LocOcorr, label = NECRO ~ "Necrópsia") %>% 
+  add_overall()
+
+```
+
+7.  CIDS de causas secundárias de interesse em menores de 50 anos: I21, I46, I 44 , I49 , I 71, I50, I42
+
+```{r}
+SIM %>% 
+  filter(CPRIMSEC == "Secundária", !is.na(IdadeM50)) %>% 
+  mutate(CBASGRP = substring(CAUSABAS, 1,3)) %>% 
+  left_join(lCID %>% select(-CID_GRUPO), by = c("CBASGRP" = "CD_COD")) %>% 
+  select(CID, IdadeM50) %>% 
+  tbl_summary(by = IdadeM50,
+              label = CID ~ "CID da Causa Primária",
+              sort = all_categorical() ~ "frequency"
+              ) %>% 
+  bold_labels()
+```
+
+8.  A proprção de SVO realizados por óbito extra hospitalar muda na comparação entre estados? <br>Considerando apenas causa primária e locais que não são estabelecimentos de saúde.
+
+```{r}
+
+SIM$LocOcorr2 <- SIM$LocOcorr
+levels(SIM$LocOcorr2) <- c("Hospital",
+                           "Outros estabelecimentos de saúde",
+                           "Outros Locais",
+                           "Outros Locais",
+                           "Outros Locais",
+                           "Outros Locais",
+                           "Outros Locais")
+
+
+SIM %>% 
+    filter(CPRIMSEC == "Primária", LocOcorr2 == "Outros Locais") %>%
+  select(NECRO, UF) %>% 
+  tbl_summary(by = NECRO, label = UF ~ "Unidade da Federação",
+              sort = all_categorical() ~ "frequency",
+              percent = "row") %>% 
+  add_overall()
+  
+```
+
+9.  Quantos têm a mesma mãe? <br>Não é possível ter acesso a essa informação utilizando o dado público.
+
+10. Quantos têm CID secundário? <br>Considerando aqueles que tiveram a causa primária de interesse.
+
+```{r}
+SIM %>% 
+  filter(CPRIMSEC == "Primária") %>% 
+  mutate(RN = row_number()) %>% 
+  select(RN, CAUSABAS, LINHAA, LINHAB, LINHAC, LINHAD, LINHAII) %>% 
+  pivot_longer(cols = c(LINHAA, LINHAB, LINHAC, LINHAD, LINHAII)) %>% 
+  filter(!is.na(value)) %>% 
+  mutate(value = substring(value, 2,5)) %>% 
+  filter(CAUSABAS != value) %>% 
+  mutate(CBASGRP = substring(value, 1,3)) %>% 
+  left_join(lCID %>% select(-CID_GRUPO), by = c("CBASGRP" = "CD_COD")) %>% 
+  select(CID) %>% 
+  tbl_summary(label = CID ~ "CID da Causa Secundária",
+              sort = all_categorical() ~ "frequency") %>% 
+  bold_labels()
+```
