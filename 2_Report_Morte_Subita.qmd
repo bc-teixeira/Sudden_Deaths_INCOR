@@ -20,19 +20,66 @@ toc: true
 library(tidyverse)
 library(gtsummary)
 library(readxl)
+library(arrow)
 options(scipen = 999)
 
 
-load("SIM Dcard.RData")
+SIM <- read_parquet("SIM Dcard_Optimized.parquet")
 
-CIDs <- c("I21", "I46", "I44", "I49", "I71", "I50", "I42", "J81")
+CIDs <- tribble(
+  ~cid,   ~descricao,
+  # --- Doença de Chagas ------------------------------------------------
+  "B570","Doença de Chagas (forma cardíaca aguda)",
+  "B572","Doença de Chagas (forma cardíaca crônica)",
+  # --- IAM / Infarto ---------------------------------------------------
+  "I21",  "Infarto agudo do miocárdio",
+  "I22",  "Infarto do miocárdio recorrente",
+  # --- Edema agudo de pulmão ------------------------------------------
+  "J81",  "Edema agudo de pulmão",
+  # --- Parada cardiorrespiratória / morte súbita ----------------------
+  "I461","Parada cardíaca devida a condição subjacente",
+  "I469","Parada cardíaca, não especificada",
+  "R960","Morte instantânea",
+  "R961","Morte ocorrida em < 24 h do início",
+  "R97",  "Morte inexplicada, aguardando investigação",
+  "R98",  "Morte sem assistência (não testemunhada)",
+  "R99",  "Causa de morte mal definida",
+  # --- Dissecção de aorta ---------------------------------------------
+  "I710","Dissecção da aorta torácica",
+  "I711","Dissecção da aorta abdominal",
+  # --- Insuficiência cardíaca -----------------------------------------
+  "I50",  "Insuficiência cardíaca",
+  # --- Outras doenças cardíacas agudas (I30–I52) -----------------------
+  "I30",  "Pericardite aguda",
+  "I31",  "Outras doenças do pericárdio",
+  "I32",  "Pericardite em doenças classificadas em outra parte",
+  "I33",  "Endocardite aguda e subaguda",
+  "I34",  "Doenças não reumáticas da valva mitral",
+  "I35",  "Doenças não reumáticas da valva aórtica",
+  "I36",  "Doenças não reumáticas da valva tricúspide",
+  "I37",  "Doenças da valva pulmonar",
+  "I38",  "Endocardite de valva, não especificada",
+  "I39",  "Endocardite/valvopatias em doenças de outra parte",
+  "I40",  "Miocardite aguda",
+  "I41",  "Miocardite em doenças classificadas em outra parte",
+  "I42",  "Cardiomiopatia",
+  "I43",  "Cardiomiopatia em doenças classificadas em outra parte",
+  "I44",  "Bloqueio A-V e bloqueio de ramo esquerdo",
+  "I45",  "Outros distúrbios de condução",
+  "I46",  "Parada cardíaca",
+  "I47",  "Taquicardia paroxística",
+  "I48",  "Fibrilação e flutter atrial",
+  "I49",  "Outras arritmias cardíacas",
+  "I51",  "Outras doenças cardíacas especificadas",
+  "I52",  "Doenças cardíacas em afecções de outra parte"
+)
 
-FxEtaria <- read_excel("D:/DATASUS/aux_datasus2.xlsx", sheet = "FaixaEtaria")
+FxEtaria <- read_excel("aux_datasus2.xlsx", sheet = "FaixaEtaria")
 FxEtaria$FaixaEtr <- factor(FxEtaria$FaixaEtr)
 FxEtaria$FaixaEtr <- reorder(FxEtaria$FaixaEtr, FxEtaria$Idade, mean)
 
-UFMUN <- read_excel("D:/DATASUS/aux_datasus2.xlsx", sheet = "UFMUN")
-lCID <- read_excel("D:/DATASUS/aux_datasus2.xlsx", sheet = "CIDs")
+UFMUN <- read_excel("aux_datasus2.xlsx", sheet = "UFMUN")
+lCID <- read_excel("aux_datasus2.xlsx", sheet = "CIDs")
 
 SIMRaw <- dplyr::as_tibble(SIM)
 
@@ -57,7 +104,10 @@ SIM <- SIMRaw %>%
                                                                  "Múltiplas fontes",
                                                                  "Ignorado")),
          NECRO = factor(NECROPSIA, levels = c(1,2,9), labels = c("Sim", "Não", "Ignorado")),
-         CPRIMSEC = factor(if_else(substring(CAUSABAS,1,3) %in% CIDs, "Primária", "Secundária")),
+         CPRIMSEC = factor(if_else(
+           substring(CAUSABAS, 1, 3) %in% CIDs$cid | 
+           substring(CAUSABAS, 1, 4) %in% CIDs$cid, 
+           "Primária", "Secundária")),
          IdadeM50 = factor(if_else(IDADEc < 50, "Menor de 50", "50 ou mais")),
          DtObito = dmy(DTOBITO),
          Ano = year(DtObito)) %>% 
@@ -70,7 +120,11 @@ SIM <- SIMRaw %>%
 
 ## Extração
 
-Foram extraídos todos os óbitos entre 2009 e 2021 que continham nos campos CAUSABAS, LINHAA, LINHAB, LINHAC, LINHAD e LINHAII quaisquer dos CIDs: `r CIDs`
+Foram extraídos todos os óbitos entre 2009 e 2023 que continham nos campos CAUSABAS, LINHAA, LINHAB, LINHAC, LINHAD e LINHAII quaisquer dos CIDs: 
+```{r}
+CIDs
+```
+
 
 ```{r}
 SIM %>% 
@@ -234,3 +288,250 @@ SIM %>%
               sort = all_categorical() ~ "frequency") %>% 
   bold_labels()
 ```
+
+## Análise Detalhada por CID Específico
+
+### Identificação de Pacientes por Causa de Morte Específica
+
+```{r}
+#| label: funcao-identificacao-cid
+#| echo: false
+#| warning: false
+
+# Função para identificar cada paciente pela causa de morte específica na tabela CIDs
+# Similar ao filter_cids, mas identifica a causa específica e classifica como primária/secundária
+identify_specific_cid <- function(dt) {
+  
+  # Create a vector of all CIDs for faster lookup
+  cids_vec <- CIDs$cid
+  
+  # Clean and handle encoding issues in the data
+  clean_string <- function(x) {
+    if(is.null(x) || length(x) == 0) return(character(0))
+    # Replace any invalid characters with empty string and handle encoding
+    x <- iconv(x, to = "UTF-8", sub = "")
+    x[is.na(x)] <- ""
+    return(x)
+  }
+  
+  # Clean CAUSABAS field
+  dt$CAUSABAS <- clean_string(dt$CAUSABAS)
+  
+  # Vectorized extraction and checking for CAUSABAS
+  causabas_3 <- substr(dt$CAUSABAS, 1, 3)
+  causabas_4 <- substr(dt$CAUSABAS, 1, 4)
+  
+  # Initialize result columns
+  dt$cid_especifico <- NA_character_
+  dt$classificacao_cid <- NA_character_
+  dt$campo_origem <- NA_character_
+  
+  # Check CAUSABAS (primary) - vectorized
+  match_4 <- causabas_4 %in% cids_vec
+  match_3 <- causabas_3 %in% cids_vec & !match_4
+  
+  dt$cid_especifico[match_4] <- causabas_4[match_4]
+  dt$cid_especifico[match_3] <- causabas_3[match_3]
+  dt$classificacao_cid[match_4 | match_3] <- "Primária"
+  dt$campo_origem[match_4 | match_3] <- "CAUSABAS"
+    # For secondary fields, process only rows not yet identified
+  not_found <- is.na(dt$cid_especifico)
+  
+  if(any(not_found)) {
+  # Extract all secondary field codes at once
+  secondary_fields <- c("LINHAA", "LINHAB", "LINHAC", "LINHAD", "LINHAII")
+  
+  for(campo in secondary_fields) {
+    # Work only with rows that haven't been found yet
+    current_not_found <- which(not_found)
+    if(length(current_not_found) == 0) break
+    
+    # Clean the field data to handle encoding issues
+    dt[[campo]] <- clean_string(dt[[campo]])
+    campo_values <- dt[[campo]][current_not_found]
+    valid_idx <- !is.na(campo_values) & nchar(campo_values) >= 4
+    
+    if(any(valid_idx)) {
+    # Extract codes from positions 2-4 and 2-5 with error handling
+    tryCatch({
+      codigo_3 <- substr(campo_values[valid_idx], 2, 4)
+      codigo_4 <- substr(campo_values[valid_idx], 2, 5)
+        # Check matches
+      match_sec_4 <- codigo_4 %in% cids_vec
+      match_sec_3 <- codigo_3 %in% cids_vec & !match_sec_4
+      
+      # Update results for found matches
+      rows_to_update <- current_not_found[valid_idx]
+      
+      if(any(match_sec_4)) {
+        update_rows <- rows_to_update[match_sec_4]
+        dt$cid_especifico[update_rows] <- codigo_4[match_sec_4]
+        dt$classificacao_cid[update_rows] <- "Secundária"
+        dt$campo_origem[update_rows] <- campo
+        not_found[update_rows] <- FALSE
+      }
+      
+      if(any(match_sec_3)) {
+        update_rows <- rows_to_update[match_sec_3]
+        dt$cid_especifico[update_rows] <- codigo_3[match_sec_3]
+        dt$classificacao_cid[update_rows] <- "Secundária"
+        dt$campo_origem[update_rows] <- campo
+        not_found[update_rows] <- FALSE
+      }
+      
+    }, error = function(e) {
+      # If there's an encoding error, skip this field
+      cat("Erro de codificação no campo", campo, "- pulando...\n")
+    })
+    }
+  }
+  }
+  
+  # Filter to keep only identified cases
+  dt_resultado <- dt[!is.na(dt$cid_especifico), ]
+  
+  return(dt_resultado)
+}
+
+# Aplicar a função de identificação
+cat("Identificando causas específicas de morte...\n")
+SIM_identificado <- identify_specific_cid(SIM)
+
+# Adicionar descrições dos CIDs
+SIM_identificado <- SIM_identificado %>%
+  left_join(CIDs, by = c("cid_especifico" = "cid")) %>%
+  mutate(
+    cid_descricao = paste0(cid_especifico, " - ", descricao),
+    classificacao_cid = factor(classificacao_cid, levels = c("Primária", "Secundária"))
+  )
+
+cat("Casos identificados:", nrow(SIM_identificado), "\n")
+cat("Distribuição por classificação:\n")
+print(table(SIM_identificado$classificacao_cid))
+
+view(SIM_identificado[1:50,c("CAUSABAS", "LINHAA", "LINHAB", "LINHAC", "LINHAD", "LINHAII", "cid_especifico", "descricao", "classificacao_cid", "campo_origem")])
+
+```
+
+### Tabela de Mortalidade por CID Específico
+
+```{r}
+#| label: tabela-mortalidade-cid-especifico
+#| echo: false
+#| warning: false
+
+library(gtsummary)
+library(gt)
+
+# Criar tabela de mortalidade por CID específico
+tabela_cid_mortalidade <- SIM_identificado %>%
+  select(cid_especifico, descricao, classificacao_cid) %>%
+  mutate(
+    cid_completo = paste0(cid_especifico, " - ", descricao)
+  ) %>%
+  count(cid_completo, classificacao_cid, name = "n_obitos") %>%
+  pivot_wider(
+    names_from = classificacao_cid,
+    values_from = n_obitos,
+    values_fill = 0
+  ) %>%
+  mutate(
+    Total = Primária + Secundária,
+    `% Primária` = round(Primária / Total * 100, 1),
+    `% Secundária` = round(Secundária / Total * 100, 1)
+  ) %>%
+  arrange(desc(Total))
+
+# Criar tabela formatada com gt
+library(scales)
+tabela_cid_mortalidade %>%                     # ── same data pipeline ──
+  select(-`% Secundária`) %>%                  # drop % secundária
+  gt() %>%                                     # build the gt table
+  tab_header(                                  # HEADER -----------------
+    title    = md("**Mortalidade por CID Específico das Causas Cardiovasculares**"),
+    subtitle = md("Distribuição entre causas primárias e secundárias (2009-2023)")
+  ) %>%                                        # COLUMN NAMES -----------
+  cols_label(
+    cid_completo = "CID – Descrição",
+    Primária     = "Primária",
+    Secundária   = "Secundária", 
+    Total        = "Total",
+    `% Primária` = "% Primária"
+  ) %>%                                        # NUMBER FORMATTING -------
+  fmt_number(
+    columns  = c(Primária, Secundária, Total),
+    decimals = 0, use_seps = TRUE
+  ) %>% 
+  fmt_number(
+    columns  = `% Primária`,
+    decimals = 1, pattern = "{x}%"
+  ) %>%                                        # COLOUR SCALES -----------
+  data_color(
+    columns = `% Primária`,
+    colors  = col_numeric(
+      palette = c("#fff5f0", "#fb6a4a", "#a50f15"),
+      domain  = c(0, 100)
+    )
+  ) %>% 
+  data_color(
+    columns = Total,
+    colors  = col_numeric(
+      palette = c("#f7fcf5", "#74c476", "#238b45"),
+      domain  = NULL
+    )
+  ) %>%                                        # GRAND TOTAL -------------
+  grand_summary_rows(
+    columns = c(Primária, Secundária, Total),
+    fns     = list(TOTAL = ~ sum(.x, na.rm = TRUE)),
+    fmt     = ~ fmt_number(.x, decimals = 0, use_seps = TRUE)
+  ) %>%                                        # STYLE -------------------
+  ## ‣ title + subtitle
+  tab_style(
+    style = list(
+      cell_fill(color = "#E9ECEF"),            # light grey banner
+      cell_text(size  = 16,                    # bigger, bold title
+                weight = "bold",
+                align = "center")
+    ),
+    locations = cells_title(groups = "title")
+  ) %>% 
+  tab_style(
+    style = cell_text(size = 12, color = "#6C757D", align = "center"),
+    locations = cells_title(groups = "subtitle")
+  ) %>% 
+  ## ‣ column labels
+  tab_style(
+    style = list(
+      cell_fill(color = "#495057"),            # dark background
+      cell_text(color = "white",
+                weight = "bold")
+    ),
+    locations = cells_column_labels()
+  ) %>% 
+  ## ‣ grand-total row
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_grand_summary()
+  ) %>%                                        # FOOTNOTES ---------------
+  tab_footnote(
+    footnote  = "Primária: CID encontrado no campo CAUSABAS (causa básica da morte)",
+    locations = cells_column_labels(columns = Primária)
+  ) %>% 
+  tab_footnote(
+    footnote  = "Secundária: CID encontrado em LINHAA, LINHAB, LINHAC, LINHAD ou LINHAII",
+    locations = cells_column_labels(columns = Secundária)
+  ) %>% 
+  tab_footnote(
+    footnote  = "Cores mais intensas indicam maior número de óbitos ou maior percentual de causas primárias",
+    locations = cells_title()
+  ) %>%                                        # TABLE-WIDE OPTIONS ------
+  tab_options(
+    table.font.size                 = px(11),
+    heading.align                   = "center",
+    data_row.padding                = px(4),
+    summary_row.padding             = px(4),
+    grand_summary_row.background.color = "#F8F9FA",
+    row.striping.background_color   = "#F8F9FA" # subtle zebra stripes
+  )
+```
+
